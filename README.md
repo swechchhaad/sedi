@@ -1,1 +1,1 @@
-This is the repository to collect data, run and analyze Utah Sedi framework supervised by Kent seamons.  
+This is the repository to collect data, run and analyze Utah Sedi framework, supervised by Kent Seamons.

@@ -1,0 +1,3 @@
+[submodule "src/keripy"]
+	path = src/keripy
+	url = https://github.com/WebOfTrust/keripy

@@ -1,0 +1,196 @@
+theory ACDC_BulkIssuance_Unlinkability
+begin
+
+builtins: hashing, signing
+
+/*
+  Cross-verifier linkability of bulk-issued private ACDCs.
+
+  Target requirement: SEDI-PRV-01, assessment objective 5 -- "multiple
+  presentations from the same holder to different verifiers cannot be linked
+  through protocol-level artifacts."
+
+  Scope: M = 2 bulk-issued copies, one holder, two mutually-unrelated
+  verifiers. Colluding verifiers are modelled as the Dolev-Yao adversary:
+  every presentation goes out on the public channel, so anything disclosed to
+  either verifier is in the adversary's knowledge.
+
+  Two disclosure modes are modelled; the SingleDisclosureMode restriction
+  forces a trace to use exactly one:
+
+    'fulllist'  - the holder discloses the whole blinded-leaf list [b_1..b_M]
+                  so the verifier can recompute the aggregate B. This is the
+                  variant the keripy worked example
+                  (tests/acdc/test_bulk_issuance.py) uses, and the one its
+                  docstring flags as residual (a).
+
+    'inclusion' - the holder discloses only the Merkle co-path plus B. This is
+                  the mitigation that residual (a) names as the fix.
+
+  Caveat on M = 2: with two leaves the co-path is the single sibling leaf, so
+  'inclusion' mode is modelled at its most favourable. For M > 2 sibling
+  co-paths share interior nodes and leak more, not less. The shared-aggregate
+  result below does not depend on M.
+*/
+
+// ---------------------------------------------------------------------
+// Restrictions
+// ---------------------------------------------------------------------
+
+restriction Equality:
+  "All x y #i. Eq(x, y) @ i ==> x = y"
+
+restriction SingleDisclosureMode:
+  "All m1 m2 #i #j. Mode(m1) @ i & Mode(m2) @ j ==> m1 = m2"
+
+// ---------------------------------------------------------------------
+// Setup
+// ---------------------------------------------------------------------
+
+rule Issuer_Keygen:
+    [ Fr(~ltk) ]
+  --[ IssuerKey($I) ]->
+    [ !Issuer($I, ~ltk), !Pk($I, pk(~ltk)), Out(pk(~ltk)) ]
+
+rule Verifier_Init:
+    [ ]
+  --[ VerifierUp($V) ]->
+    [ !Verifier($V) ]
+
+// ---------------------------------------------------------------------
+// Bulk issuance of M = 2 semantically identical copies
+//
+// Copy facts are LINEAR, so each copy is spent at most once. That is exactly
+// the "one copy per verifier" discipline bulk issuance requires; a holder who
+// replays one copy links itself trivially and is out of scope here.
+// ---------------------------------------------------------------------
+
+rule Bulk_Issue:
+  let u1    = h(<~salt, '1'>)
+      u2    = h(<~salt, '2'>)
+      said1 = h(<'over21', u1>)
+      said2 = h(<'over21', u2>)
+      b1    = h(<said1, ~blind1>)
+      b2    = h(<said2, ~blind2>)
+      B     = h(<b1, b2>)
+  in
+    [ !Issuer($I, ~ltk), Fr(~salt), Fr(~blind1), Fr(~blind2) ]
+  --[ BulkIssued($I, $H, B) ]->
+    [ Copy($H, '1', said1, ~blind1, <b1, b2>, b2, B, sign(said1, ~ltk))
+    , Copy($H, '2', said2, ~blind2, <b1, b2>, b1, B, sign(said2, ~ltk))
+    , Out(B)
+    ]
+
+// ---------------------------------------------------------------------
+// Presentation
+// ---------------------------------------------------------------------
+
+rule Present_FullList:
+    [ Copy($H, k, said, blind, list, sib, B, sig), !Verifier($V) ]
+  --[ Mode('fulllist')
+    , Presented($H, $V, k, said)
+    , RevealsSaid($H, $V, said)
+    , RevealsList($H, $V, list)
+    , RevealsAgg($H, $V, B)
+    , Reveals($H, $V, said)
+    , Reveals($H, $V, list)
+    , Reveals($H, $V, B)
+    ]->
+    [ Out(<said, blind, list, B, sig>) ]
+
+rule Present_Inclusion:
+    [ Copy($H, k, said, blind, list, sib, B, sig), !Verifier($V) ]
+  --[ Mode('inclusion')
+    , Presented($H, $V, k, said)
+    , RevealsSaid($H, $V, said)
+    , RevealsSib($H, $V, sib)
+    , RevealsAgg($H, $V, B)
+    , Reveals($H, $V, said)
+    , Reveals($H, $V, sib)
+    , Reveals($H, $V, B)
+    ]->
+    [ Out(<said, blind, sib, B, sig>) ]
+
+rule Verifier_Accept:
+    [ !Verifier($V), !Pk($I, pkI), In(<said, blind, aux, B, sig>) ]
+  --[ Eq(verify(sig, said, pkI), true)
+    , Accepted($V, $I, said, B)
+    ]->
+    [ ]
+
+// ---------------------------------------------------------------------
+// Sanity: the model is not dead, and the credential really does verify
+// ---------------------------------------------------------------------
+
+lemma sanity_two_contexts_verify:
+  exists-trace
+  "Ex I V1 V2 s1 s2 B #i #j.
+       Accepted(V1, I, s1, B) @ i
+     & Accepted(V2, I, s2, B) @ j
+     & not(V1 = V2)
+     & not(s1 = s2)"
+
+// ---------------------------------------------------------------------
+// What bulk issuance DOES deliver: the per-copy SAIDs partition cleanly.
+// Expected: verified.
+// ---------------------------------------------------------------------
+
+lemma bulk_issuance_partitions_saids:
+  all-traces
+  "All H V1 V2 x #i #j.
+       RevealsSaid(H, V1, x) @ i
+     & RevealsSaid(H, V2, x) @ j
+     & not(V1 = V2)
+     ==> F"
+
+// ---------------------------------------------------------------------
+// SEDI-PRV-01 objective 5, stated directly. No artifact disclosed to one
+// verifier is ever disclosed to another verifier by the same holder.
+// Expected: FALSIFIED -- Tamarin returns the join key as a counterexample.
+// ---------------------------------------------------------------------
+
+lemma PRV01_no_cross_verifier_join_key:
+  all-traces
+  "All H V1 V2 x #i #j.
+       Reveals(H, V1, x) @ i
+     & Reveals(H, V2, x) @ j
+     & not(V1 = V2)
+     ==> F"
+
+// ---------------------------------------------------------------------
+// Which artifact is the join key, mode by mode.
+// ---------------------------------------------------------------------
+
+// Residual (a): the disclosed membership list is byte-identical across
+// contexts. Expected: verified (the attack exists).
+lemma attack_membership_list_is_join_key:
+  exists-trace
+  "Ex H V1 V2 l #i #j #k #m.
+       RevealsList(H, V1, l) @ i
+     & RevealsList(H, V2, l) @ j
+     & not(V1 = V2)
+     & K(l) @ k
+     & Mode('fulllist') @ m"
+
+// Merkle co-paths do not collide, so inclusion proofs really do remove
+// residual (a). Expected: verified.
+lemma inclusion_copaths_do_not_collide:
+  all-traces
+  "All H V1 V2 s #i #j.
+       RevealsSib(H, V1, s) @ i
+     & RevealsSib(H, V2, s) @ j
+     & not(V1 = V2)
+     ==> F"
+
+// ...but the shared aggregate survives the fix and is still a join key.
+// Expected: verified (the attack persists under the mitigation).
+lemma attack_aggregate_is_join_key_under_inclusion_proofs:
+  exists-trace
+  "Ex H V1 V2 B #i #j #k #m.
+       RevealsAgg(H, V1, B) @ i
+     & RevealsAgg(H, V2, B) @ j
+     & not(V1 = V2)
+     & K(B) @ k
+     & Mode('inclusion') @ m"
+
+end

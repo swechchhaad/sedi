@@ -1,0 +1,514 @@
+theory SEDI_CRY01_OfflineVerification
+begin
+
+builtins: hashing, signing
+functions: mac/2   // used ONLY by the SHARED_SECRET negative control
+
+/*
+  SEDI-CRY-01: Non-callback signature verification.
+
+  Run exactly one variant flag (see scripts/run_all.sh):
+
+    -D VARIANT_A          Plain offline credential. Verifier holds the
+                          Department's published verification key pk(skD) and
+                          receives <said, sign(said, skD)>. No KEL.
+    -D VARIANT_A -D SHARED_SECRET
+                          NEGATIVE CONTROL. Same as A but the "signature" is a
+                          MAC under a key pre-shared between D and V. Exists to
+                          show that no_shared_secret_path is discriminating.
+    -D VARIANT_B_CARRIED  KERI/ACDC, KEL evidence CARRIED by the holder: the
+                          presentation includes icp (+ optional rot) and the
+                          signed ixn event whose seal anchors the ACDC SAID.
+    -D VARIANT_B_CACHED   KERI/ACDC, KEL evidence CACHED at the verifier from an
+                          earlier witness sync (CacheSync). The check itself is
+                          local.
+    -D VARIANT_C          KERI/ACDC as implemented in keripy
+                          (src/keri/vdr/verifying.py:126-143): acceptance is
+                          gated on TEL state for the credential; if absent the
+                          verifier escrows and cues a `telquery` carrying the
+                          credential SAID to the issuer registry or a witness.
+
+  Where current KEL state comes from, per variant:
+      A          : not applicable (static key published out of band)
+      B_CARRIED  : carried as a proof inside the presentation
+      B_CACHED   : cached locally, obtained online BEFORE the check
+      C          : retrieved online DURING the check
+
+  KEL vs. "Department's published verification key" (documented difference):
+    In A the verifier's trust anchor is a static key. In B/C the trust anchor
+    is the issuer AID = h(<k0, h(k1)>), a self-certifying digest of the
+    inception key and the pre-rotation commitment. The AID alone does NOT
+    let a verifier check a signature: it also needs the KEL events that bind
+    the signing key to the AID and the ixn event anchoring the credential.
+    KERI's protection against post-rotation compromise of an old key depends
+    on the verifier knowing the CURRENT key state, i.e., on fresh KEL data.
+
+  Abstractions / assumptions (all documented, see docs/REPORT.md):
+    AS-PUB   A: verifier obtains an authentic copy of pk(skD) once, out of
+             band (VerifierLoaded). Not network communication in the check.
+    AS-WIT   B_CACHED, C: the witness pool is honest and non-duplicitous
+             and serves verifiers over an authenticated channel. Witnesses
+             only accept events signed by the current key.
+    AS-STAT  The status service answers from true TEL state over an
+             authenticated channel (!TELIss / !TELRev are read directly).
+    AS-KEYS  Signatures are perfect symbolic signatures (builtin signing).
+    AS-ROT   At most one rotation per AID (bounded model).
+    CESR encoding, sequence numbers, receipts, delegation: not modelled.
+    Key compromise IS modelled (Reveal rules); it is not omitted.
+*/
+
+// ---------------------------------------------------------------------
+// Restrictions
+// ---------------------------------------------------------------------
+
+restriction Eq:  "All x y #i. Eq(x, y) @ i ==> x = y"
+restriction Neq: "All x y #i. Neq(x, y) @ i ==> not(x = y)"
+
+restriction OneSetupPerIssuer:
+  "All D #i #j. IssuerSetup(D) @ i & IssuerSetup(D) @ j ==> #i = #j"
+
+restriction OneRotationPerAID:
+  "All a #i #j. Rotated(a) @ i & Rotated(a) @ j ==> #i = #j"
+
+restriction OneWitnessInceptionPerAID:
+  "All a #i #j. WitIncept(a) @ i & WitIncept(a) @ j ==> #i = #j"
+
+// =====================================================================
+// VARIANT A: static published Department key
+// =====================================================================
+#ifdef VARIANT_A
+
+rule A_Dept_Setup:
+    [ Fr(~skD) ]
+  --[ IssuerSetup($D), Published(pk(~skD)) ]->
+    [ !DeptSk($D, ~skD), !DeptPk($D, pk(~skD)), Out(pk(~skD)) ]
+
+// AS-PUB: one-time authentic publication of the key. Happens before, and
+// independently of, any authenticity check.
+rule A_Verifier_Load_Published_Key:
+    [ !DeptPk(D, pkD) ]
+  --[ VerifierLoaded($V, D, pkD) ]->
+    [ !VKey($V, D, pkD) ]
+
+rule A_Reveal_Dept_Key:
+    [ !DeptSk(D, skD) ]
+  --[ Reveal(D, pk(skD)) ]->
+    [ Out(skD) ]
+
+#endif
+
+// NOTE: Tamarin 1.12's preprocessor mis-parses nested #ifdef blocks, so
+// variant sub-cases use compound conditions instead of nesting.
+#ifdef VARIANT_A & SHARED_SECRET
+// NEGATIVE CONTROL: D and V share ~kDV. The verifier "authenticates" the
+// credential by recomputing a MAC. kDV is never published.
+rule A_SS_Pair:
+    [ Fr(~kDV), !DeptSk(D, skD) ]
+  --[ SharedKey(D, $V, ~kDV) ]->
+    [ !SSKey(D, $V, ~kDV) ]
+
+rule A_SS_Issue:
+  let said = h(<D, ~attrs>)
+      cred = <said, mac(said, kDV)>
+  in
+    [ !SSKey(D, V, kDV), Fr(~attrs) ]
+  --[ Issued(D, said, cred) ]->
+    [ !TELIss(D, said), Out(cred) ]
+
+rule A_SS_Verify_Accept:
+    [ !SSKey(D, $V, kDV), In(<said, tag>), Fr(~sid) ]
+  --[ Eq(tag, mac(said, kDV))
+    , AuthAccept(~sid, $V, D, said)
+    , VerifiedWith(~sid, kDV)
+    , Evidence(~sid, 'shared_secret')
+    ]->
+    [ AuthOK(~sid, $V, D, said) ]
+
+rule A_SS_Verify_Reject:
+    [ !SSKey(D, $V, kDV), In(<said, tag>), Fr(~sid) ]
+  --[ Neq(tag, mac(said, kDV)), AuthReject(~sid, $V, D, <said, tag>) ]->
+    [ ]
+
+#endif
+
+#ifdef VARIANT_A & not SHARED_SECRET
+
+rule A_Issue:
+  let said = h(<D, ~attrs>)
+      cred = <said, sign(said, skD)>
+  in
+    [ !DeptSk(D, skD), Fr(~attrs) ]
+  --[ Issued(D, said, cred) ]->
+    [ !TELIss(D, said), Out(cred) ]
+
+rule A_Verify_Accept:
+    [ !VKey($V, D, pkD), In(<said, sig>), Fr(~sid) ]
+  --[ Eq(verify(sig, said, pkD), true)
+    , AuthAccept(~sid, $V, D, said)
+    , VerifiedWith(~sid, pkD)
+    , Evidence(~sid, 'static_key')
+    ]->
+    [ AuthOK(~sid, $V, D, said) ]
+
+rule A_Verify_Reject:
+    [ !VKey($V, D, pkD), In(<said, sig>), Fr(~sid) ]
+  --[ Neq(verify(sig, said, pkD), true)
+    , AuthReject(~sid, $V, D, <said, sig>)
+    ]->
+    [ ]
+
+#endif
+
+// =====================================================================
+// KERI key event log (shared by B_CARRIED, B_CACHED, C)
+// =====================================================================
+#ifdef VARIANT_B_CARRIED | VARIANT_B_CACHED | VARIANT_C
+
+rule K_Incept:
+  let k0  = pk(~sk0)
+      n1  = h(pk(~sk1))
+      aid = h(<k0, n1>)
+      icp = <'icp', aid, k0, n1>
+  in
+    [ Fr(~sk0), Fr(~sk1) ]
+  --[ IssuerSetup($D), AIDOf($D, aid), KeyCurrent(aid, k0)
+    , Published(aid), Published(k0) ]->
+    [ IssuerState($D, aid, ~sk0, ~sk1, 'e0')
+    , !IssuerAID($D, aid)
+    , !KeyOf(aid, ~sk0)
+    , !KeyOf(aid, ~sk1)
+    , !Icp(aid, icp, sign(icp, ~sk0))
+    , Out(<icp, sign(icp, ~sk0)>)
+    ]
+
+// Rotation: reveal the pre-committed key k1, commit to a fresh k2.
+rule K_Rotate:
+  let k1  = pk(sk1)
+      n2  = h(pk(~sk2))
+      rot = <'rot', aid, k1, n2>
+  in
+    [ IssuerState(D, aid, sk0, sk1, 'e0'), Fr(~sk2) ]
+  --[ Rotated(aid), Retired(aid, pk(sk0)), KeyCurrent(aid, k1)
+    , Published(k1) ]->
+    [ IssuerState(D, aid, sk1, ~sk2, 'e1')
+    , !KeyOf(aid, ~sk2)
+    , !Rot(aid, rot, sign(rot, sk1))
+    , Out(<rot, sign(rot, sk1)>)
+    ]
+
+// Issuance: the ACDC itself carries no signature. It is anchored by a seal
+// (its SAID) in an interaction event signed with the current key.
+rule K_Issue:
+  let said = h(<aid, ~attrs>)
+      ixn  = <'ixn', aid, pk(skc), said>
+      sig  = sign(ixn, skc)
+  in
+    [ IssuerState(D, aid, skc, skn, e), Fr(~attrs) ]
+  --[ Issued(aid, said, <said, aid, ixn, sig>), IssuedUnderKey(aid, said, pk(skc)) ]->
+    [ IssuerState(D, aid, skc, skn, e)
+    , !Ixn(aid, said, ixn, sig)
+    , !TELIss(aid, said)
+    , Out(<<said, aid>, ixn, sig>)
+    ]
+
+// AS-PUB-AID: the verifier pins the Department's AID once, out of band
+// (the KERI analogue of loading a published key). Without this anchor any
+// attacker-incepted self-certifying AID would verify.
+rule K_Verifier_Pin_AID:
+    [ !IssuerAID(D, aid) ]
+  --[ VerifierLoaded($V, D, aid) ]->
+    [ !TrustAID($V, aid) ]
+
+// Compromise of ANY key ever associated with the AID (current, pre-rotated,
+// or retired). Retired is used by the lemmas to separate the cases.
+rule K_Reveal:
+    [ !KeyOf(aid, sk) ]
+  --[ Reveal(aid, pk(sk)) ]->
+    [ Out(sk) ]
+
+#endif
+
+// ---------------------------------------------------------------------
+// Witness pool (AS-WIT). Accepts KEL events from the network, enforcing
+// self-certification and current-key signing. Used by B_CACHED and C.
+// ---------------------------------------------------------------------
+#ifdef VARIANT_B_CACHED | VARIANT_C
+
+rule W_Accept_Icp:
+  let icp = <'icp', aid, k0, n1> in
+    [ In(<icp, s>) ]
+  --[ Eq(aid, h(<k0, n1>))
+    , Eq(verify(s, icp, k0), true)
+    , WitIncept(aid)
+    , WitKey(aid, k0)
+    ]->
+    [ WitState(aid, k0, n1) ]
+
+rule W_Accept_Rot:
+  let rot = <'rot', aid, k1, n2> in
+    [ WitState(aid, k0, n1), In(<rot, s>) ]
+  --[ Eq(h(k1), n1)
+    , Eq(verify(s, rot, k1), true)
+    , WitKey(aid, k1)
+    , WitRetired(aid, k0)
+    ]->
+    [ WitState(aid, k1, n2) ]
+
+rule W_Accept_Ixn:
+  let ixn = <'ixn', aid, k, said> in
+    [ WitState(aid, k, n), In(<ixn, s>) ]
+  --[ Eq(verify(s, ixn, k), true)
+    , WitAnchored(aid, said)
+    ]->
+    [ WitState(aid, k, n), !WitIxn(aid, said) ]
+
+#endif
+
+// =====================================================================
+// VARIANT B_CARRIED: holder carries KEL evidence (offline, self-certifying)
+// =====================================================================
+#ifdef VARIANT_B_CARRIED
+
+// Credential issued under the inception key k0.
+rule BC_Verify_Accept_Key0:
+  let icp = <'icp', aid, k0, n1>
+      ixn = <'ixn', aid, k0, said>
+  in
+    [ !TrustAID($V, aid), In(<<said, aid>, icp, sicp, ixn, sixn>), Fr(~sid) ]
+  --[ Eq(aid, h(<k0, n1>))
+    , Eq(verify(sicp, icp, k0), true)
+    , Eq(verify(sixn, ixn, k0), true)
+    , AuthAccept(~sid, $V, aid, said)
+    , VerifiedWith(~sid, k0)
+    , Evidence(~sid, 'carried')
+    ]->
+    [ AuthOK(~sid, $V, aid, said) ]
+
+// Credential issued under the rotated key k1; holder carries the rot event.
+rule BC_Verify_Accept_Key1:
+  let icp = <'icp', aid, k0, n1>
+      rot = <'rot', aid, k1, n2>
+      ixn = <'ixn', aid, k1, said>
+  in
+    [ !TrustAID($V, aid), In(<<said, aid>, icp, sicp, rot, srot, ixn, sixn>), Fr(~sid) ]
+  --[ Eq(aid, h(<k0, n1>))
+    , Eq(verify(sicp, icp, k0), true)
+    , Eq(h(k1), n1)
+    , Eq(verify(srot, rot, k1), true)
+    , Eq(verify(sixn, ixn, k1), true)
+    , AuthAccept(~sid, $V, aid, said)
+    , VerifiedWith(~sid, k1)
+    , Evidence(~sid, 'carried')
+    ]->
+    [ AuthOK(~sid, $V, aid, said) ]
+
+// Reject if the anchoring signature does not verify under the claimed key.
+rule BC_Verify_Reject:
+  let ixn = <'ixn', aid, k, said> in
+    [ !TrustAID($V, aid), In(<<said, aid>, ixn, sixn>), Fr(~sid) ]
+  --[ Neq(verify(sixn, ixn, k), true)
+    , AuthReject(~sid, $V, aid, <said, aid, ixn, sixn>)
+    ]->
+    [ ]
+
+#endif
+
+// =====================================================================
+// VARIANT B_CACHED: verifier syncs from witnesses BEFORE the check
+// =====================================================================
+#ifdef VARIANT_B_CACHED
+
+// Online sync. NOT part of any authenticity check session.
+rule BK_Verifier_Cache_Sync:
+    [ !WitIxn(aid, said) ]
+  --[ CacheSync($V, aid, said) ]->
+    [ !Cache($V, aid, said) ]
+
+rule BK_Verify_Accept:
+    [ !TrustAID($V, aid), !Cache($V, aid, said), In(<said, aid>), Fr(~sid) ]
+  --[ AuthAccept(~sid, $V, aid, said)
+    , VerifiedWith(~sid, aid)
+    , Evidence(~sid, 'cached')
+    ]->
+    [ AuthOK(~sid, $V, aid, said) ]
+
+// Cache miss: in a pure-offline verifier this is an authenticity failure
+// (the verifier has no evidence). The credential may nevertheless be genuine.
+rule BK_Verify_CacheMiss:
+    [ !TrustAID($V, aid), !Ixn(aid, said, ixn, sig), In(<said, aid>), Fr(~sid) ]
+  --[ CacheMiss(~sid, $V, <said, aid, ixn, sig>) ]->
+    [ ]
+
+#endif
+
+// =====================================================================
+// VARIANT C: online KEL/TEL retrieval during the check (keripy behaviour)
+// =====================================================================
+#ifdef VARIANT_C
+
+rule C_Verify_Start_QueryDepartment:
+    [ !TrustAID($V, aid), In(<said, aid>), Fr(~sid) ]
+  --[ AuthCheckStart(~sid, $V, <said, aid>)
+    , DepartmentQuery(~sid, said)
+    , ThirdPartyQuery(~sid, said)
+    , StatusQuery(~sid, $V, said)
+    ]->
+    [ CAwait(~sid, $V, said, aid), Out(<'telquery', aid, said>) ]
+
+rule C_Verify_Start_QueryWitness:
+    [ !TrustAID($V, aid), In(<said, aid>), Fr(~sid) ]
+  --[ AuthCheckStart(~sid, $V, <said, aid>)
+    , ThirdPartyQuery(~sid, said)
+    , StatusQuery(~sid, $V, said)
+    ]->
+    [ CAwait(~sid, $V, said, aid), Out(<'telquery', aid, said>) ]
+
+// keripy: accept only when KEL anchoring AND TEL 'iss' state are present.
+rule C_Verify_Accept:
+    [ CAwait(sid, V, said, aid), !WitIxn(aid, said), !TELIss(aid, said) ]
+  --[ AuthAccept(sid, V, aid, said)
+    , VerifiedWith(sid, aid)
+    , Evidence(sid, 'online')
+    ]->
+    [ AuthOK(sid, V, aid, said) ]
+
+// keripy MissingRegistryError: TEL/registry unavailable or stale beyond
+// CredentialExpiry -> credential escrowed and never accepted. The verifier
+// cannot tell this apart from a credential that does not verify.
+rule C_Verify_Escrow_Timeout:
+    [ CAwait(sid, V, said, aid), !Ixn(aid, said, ixn, sig) ]
+  --[ AuthReject(sid, V, aid, <said, aid, ixn, sig>) ]->
+    [ ]
+
+#endif
+
+// ---------------------------------------------------------------------
+// Status (TEL) - shared. Status check is a separate step AFTER auth.
+// ---------------------------------------------------------------------
+
+rule Issuer_Revoke:
+    [ !TELIss(D, said) ]
+  --[ Revoked(D, said) ]->
+    [ !TELRev(D, said) ]
+
+rule Verifier_Status_Query:
+    [ AuthOK(sid, V, D, said) ]
+  --[ StatusQuery(sid, V, said), StatusQueryAfterAuth(sid) ]->
+    [ AwaitStatus(sid, V, D, said) ]
+
+rule Verifier_Status_Good:
+    [ AwaitStatus(sid, V, D, said), !TELIss(D, said) ]
+  --[ StatusGood(sid, V, said) ]->
+    [ ]
+
+rule Verifier_Status_Revoked:
+    [ AwaitStatus(sid, V, D, said), !TELRev(D, said) ]
+  --[ StatusFail(sid, V, said, 'revoked') ]->
+    [ ]
+
+rule Verifier_Status_Unavailable:
+    [ AwaitStatus(sid, V, D, said) ]
+  --[ StatusFail(sid, V, said, 'unavailable') ]->
+    [ ]
+
+// =====================================================================
+// Lemmas (identical statements in every variant)
+// =====================================================================
+
+// ---- Sanity: the honest path is executable -------------------------
+
+lemma sanity_honest_accept:
+  exists-trace
+  "Ex sid V D s c #i #a.
+       Issued(D, s, c) @ i
+     & AuthAccept(sid, V, D, s) @ a
+     & not(Ex k #r. Reveal(D, k) @ r)"
+
+lemma sanity_authentic_but_revoked:
+  exists-trace
+  "Ex sid V D s #a #f.
+       AuthAccept(sid, V, D, s) @ a
+     & StatusFail(sid, V, s, 'revoked') @ f"
+
+// ---- 1. Unforgeability / authenticity ------------------------------
+
+lemma auth_unforgeability:
+  "All sid V D s #a.
+       AuthAccept(sid, V, D, s) @ a
+     ==> (Ex c #i. Issued(D, s, c) @ i & i < a)
+       | (Ex k #r. Reveal(D, k) @ r & r < a)"
+
+// Stronger KERI-specific statement: a key compromised only AFTER it was
+// rotated out must not enable forgery. Meaningful for B/C; in A there is no
+// rotation, so Retired never occurs and this reduces to auth_unforgeability.
+lemma auth_unforgeability_post_rotation_compromise:
+  "All sid V D s #a.
+       AuthAccept(sid, V, D, s) @ a
+     ==> (Ex c #i. Issued(D, s, c) @ i & i < a)
+       | (Ex k #r. Reveal(D, k) @ r & r < a
+                 & not(Ex #t. Retired(D, k) @ t & t < r))"
+
+// ---- 2. Offline authenticity ----------------------------------------
+
+lemma offline_auth_no_department_or_third_party_query:
+  "All sid V D s #a.
+       AuthAccept(sid, V, D, s) @ a
+     ==> not(Ex x #q. DepartmentQuery(sid, x) @ q)
+       & not(Ex x #q. ThirdPartyQuery(sid, x) @ q)"
+
+// Documents whether the evidence used offline was obtained online earlier.
+// Only B_CACHED produces CacheSync; see the report.
+lemma cached_evidence_requires_prior_online_sync:
+  "All sid V D s #a.
+       AuthAccept(sid, V, D, s) @ a & Evidence(sid, 'cached') @ a
+     ==> Ex #c. CacheSync(V, D, s) @ c & c < a"
+
+// Offline evidence availability: a genuine credential never fails the
+// offline check for lack of evidence. Only B_CACHED has a cache-miss path;
+// a falsification there means offline verification is conditional on the
+// cache having been synced after issuance.
+lemma offline_evidence_always_available:
+  "All sid V c #m.
+       CacheMiss(sid, V, c) @ m
+     ==> not(Ex D s #i. Issued(D, s, c) @ i)"
+
+// ---- 3. Separation of status ----------------------------------------
+
+lemma status_not_required_for_auth:
+  "All sid V D s #a.
+       AuthAccept(sid, V, D, s) @ a
+     ==> not(Ex x #q. StatusQuery(sid, V, x) @ q & q < a)"
+
+// An authenticity rejection is only ever produced for a credential that
+// was not issued in that form. If a genuine credential can be rejected as
+// "not authentic" because status/TEL was unavailable, status failure and
+// authenticity failure are conflated.
+lemma status_failure_distinguishable_from_auth_failure:
+  "All sid V D c #r.
+       AuthReject(sid, V, D, c) @ r
+     ==> not(Ex s #i. Issued(D, s, c) @ i)"
+
+// Any status verdict belongs to a check whose authenticity already passed.
+lemma status_verdict_follows_auth:
+  "All sid V s why #f.
+       StatusFail(sid, V, s, why) @ f
+     ==> Ex D #a. AuthAccept(sid, V, D, s) @ a & a < f"
+
+// ---- 4. No shared-secret path ---------------------------------------
+
+// Every piece of verification material used on the acceptance path was
+// published on the public channel (Published marks each Out of public key
+// material) before the acceptance. A shared secret is never Published.
+// Note: K(vk)@k cannot be used here - Tamarin only records K facts for terms
+// the adversary actually constructs in the trace.
+lemma no_shared_secret_path:
+  "All sid vk #a.
+       VerifiedWith(sid, vk) @ a
+     ==> Ex #p. Published(vk) @ p & p < a"
+
+// Negative-control check: in SHARED_SECRET the shared key stays secret, so
+// the acceptance path really does depend on a non-public secret.
+lemma shared_secret_is_secret:
+  "All D V k #i. SharedKey(D, V, k) @ i ==> not(Ex #j. K(k) @ j)"
+
+end

@@ -1,0 +1,120 @@
+{
+ "runs": [
+  {
+   "id": "cry01_A",
+   "variant": "A plain offline",
+   "flags": [
+    "VARIANT_A"
+   ],
+   "expected": {
+    "sanity_honest_accept": "verified",
+    "sanity_authentic_but_revoked": "verified",
+    "auth_unforgeability": "verified",
+    "auth_unforgeability_post_rotation_compromise": "verified",
+    "offline_auth_no_department_or_third_party_query": "verified",
+    "cached_evidence_requires_prior_online_sync": "verified",
+    "offline_evidence_always_available": "verified",
+    "status_not_required_for_auth": "verified",
+    "status_failure_distinguishable_from_auth_failure": "verified",
+    "status_verdict_follows_auth": "verified",
+    "no_shared_secret_path": "verified",
+    "shared_secret_is_secret": "verified"
+   },
+   "requirement": "CRY-01",
+   "theory": "tamarin/cry01_offline_verification.spthy"
+  },
+  {
+   "id": "cry01_A_sharedsecret_NEG",
+   "variant": "A negative control: shared-secret MAC",
+   "flags": [
+    "VARIANT_A",
+    "SHARED_SECRET"
+   ],
+   "expected": {
+    "sanity_honest_accept": "verified",
+    "sanity_authentic_but_revoked": "verified",
+    "auth_unforgeability": "verified",
+    "auth_unforgeability_post_rotation_compromise": "verified",
+    "offline_auth_no_department_or_third_party_query": "verified",
+    "cached_evidence_requires_prior_online_sync": "verified",
+    "offline_evidence_always_available": "verified",
+    "status_not_required_for_auth": "verified",
+    "status_failure_distinguishable_from_auth_failure": "falsified",
+    "status_verdict_follows_auth": "verified",
+    "no_shared_secret_path": "falsified",
+    "shared_secret_is_secret": "verified"
+   },
+   "requirement": "CRY-01",
+   "theory": "tamarin/cry01_offline_verification.spthy"
+  },
+  {
+   "id": "cry01_B_carried",
+   "variant": "B KEL carried by holder",
+   "flags": [
+    "VARIANT_B_CARRIED"
+   ],
+   "expected": {
+    "sanity_honest_accept": "verified",
+    "sanity_authentic_but_revoked": "verified",
+    "auth_unforgeability": "verified",
+    "auth_unforgeability_post_rotation_compromise": "falsified",
+    "offline_auth_no_department_or_third_party_query": "verified",
+    "cached_evidence_requires_prior_online_sync": "verified",
+    "offline_evidence_always_available": "verified",
+    "status_not_required_for_auth": "verified",
+    "status_failure_distinguishable_from_auth_failure": "verified",
+    "status_verdict_follows_auth": "verified",
+    "no_shared_secret_path": "verified",
+    "shared_secret_is_secret": "verified"
+   },
+   "requirement": "CRY-01",
+   "theory": "tamarin/cry01_offline_verification.spthy"
+  },
+  {
+   "id": "cry01_B_cached",
+   "variant": "B KEL cached from witnesses",
+   "flags": [
+    "VARIANT_B_CACHED"
+   ],
+   "expected": {
+    "sanity_honest_accept": "verified",
+    "sanity_authentic_but_revoked": "verified",
+    "auth_unforgeability": "verified",
+    "auth_unforgeability_post_rotation_compromise": "verified",
+    "offline_auth_no_department_or_third_party_query": "verified",
+    "cached_evidence_requires_prior_online_sync": "verified",
+    "offline_evidence_always_available": "falsified",
+    "status_not_required_for_auth": "verified",
+    "status_failure_distinguishable_from_auth_failure": "verified",
+    "status_verdict_follows_auth": "verified",
+    "no_shared_secret_path": "verified",
+    "shared_secret_is_secret": "verified"
+   },
+   "requirement": "CRY-01",
+   "theory": "tamarin/cry01_offline_verification.spthy"
+  },
+  {
+   "id": "cry01_C",
+   "variant": "C online KEL/TEL retrieval (keripy)",
+   "flags": [
+    "VARIANT_C"
+   ],
+   "expected": {
+    "sanity_honest_accept": "verified",
+    "sanity_authentic_but_revoked": "verified",
+    "auth_unforgeability": "verified",
+    "auth_unforgeability_post_rotation_compromise": "verified",
+    "offline_auth_no_department_or_third_party_query": "falsified",
+    "cached_evidence_requires_prior_online_sync": "verified",
+    "offline_evidence_always_available": "verified",
+    "status_not_required_for_auth": "falsified",
+    "status_failure_distinguishable_from_auth_failure": "falsified",
+    "status_verdict_follows_auth": "verified",
+    "no_shared_secret_path": "verified",
+    "shared_secret_is_secret": "verified"
+   },
+   "requirement": "CRY-01",
+   "theory": "tamarin/cry01_offline_verification.spthy"
+  }
+ ]
+}

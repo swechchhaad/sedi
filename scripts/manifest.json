@@ -21,7 +21,10 @@
     "shared_secret_is_secret": "verified"
    },
    "requirement": "CRY-01",
-   "theory": "tamarin/cry01_offline_verification.spthy"
+   "theory": "tamarin/cry01_offline_verification.spthy",
+   "args": [
+    "--heuristic=S"
+   ]
   },
   {
    "id": "cry01_A_sharedsecret_NEG",
@@ -45,7 +48,10 @@
     "shared_secret_is_secret": "verified"
    },
    "requirement": "CRY-01",
-   "theory": "tamarin/cry01_offline_verification.spthy"
+   "theory": "tamarin/cry01_offline_verification.spthy",
+   "args": [
+    "--heuristic=S"
+   ]
   },
   {
    "id": "cry01_B_carried",
@@ -54,6 +60,8 @@
     "VARIANT_B_CARRIED"
    ],
    "expected": {
+    "ixn_signature_origin": "verified",
+    "rot_signature_origin": "verified",
     "sanity_honest_accept": "verified",
     "sanity_authentic_but_revoked": "verified",
     "auth_unforgeability": "verified",
@@ -68,7 +76,10 @@
     "shared_secret_is_secret": "verified"
    },
    "requirement": "CRY-01",
-   "theory": "tamarin/cry01_offline_verification.spthy"
+   "theory": "tamarin/cry01_offline_verification.spthy",
+   "args": [
+    "--heuristic=S"
+   ]
   },
   {
    "id": "cry01_B_cached",
@@ -77,6 +88,8 @@
     "VARIANT_B_CACHED"
    ],
    "expected": {
+    "ixn_signature_origin": "verified",
+    "rot_signature_origin": "verified",
     "sanity_honest_accept": "verified",
     "sanity_authentic_but_revoked": "verified",
     "auth_unforgeability": "verified",
@@ -91,7 +104,10 @@
     "shared_secret_is_secret": "verified"
    },
    "requirement": "CRY-01",
-   "theory": "tamarin/cry01_offline_verification.spthy"
+   "theory": "tamarin/cry01_offline_verification.spthy",
+   "args": [
+    "--heuristic=S"
+   ]
   },
   {
    "id": "cry01_C",
@@ -100,6 +116,8 @@
     "VARIANT_C"
    ],
    "expected": {
+    "ixn_signature_origin": "verified",
+    "rot_signature_origin": "verified",
     "sanity_honest_accept": "verified",
     "sanity_authentic_but_revoked": "verified",
     "auth_unforgeability": "verified",
@@ -114,7 +132,10 @@
     "shared_secret_is_secret": "verified"
    },
    "requirement": "CRY-01",
-   "theory": "tamarin/cry01_offline_verification.spthy"
+   "theory": "tamarin/cry01_offline_verification.spthy",
+   "args": [
+    "--heuristic=S"
+   ]
   }
  ]
 }

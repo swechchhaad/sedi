@@ -67,6 +67,16 @@ restriction Neq: "All x y #i. Neq(x, y) @ i ==> not(x = y)"
 restriction OneSetupPerIssuer:
   "All D #i #j. IssuerSetup(D) @ i & IssuerSetup(D) @ j ==> #i = #j"
 
+restriction NoIssueUnderRetiredKey:
+  "All aid #i #j. IssueEpoch(aid, 'e0') @ i & Rotated(aid) @ j ==> #i < #j"
+
+restriction WitNoOldKeyAfterRotation:
+  "All aid k #i #j. WitAcceptEpoch(aid, 'e0') @ i & WitRetired(aid, k) @ j ==> #i < #j"
+
+// AS-ROT also at the witnesses: at most one rotation per AID is accepted.
+restriction OneWitnessRotationPerAID:
+  "All aid k k2 #i #j. WitRetired(aid, k) @ i & WitRetired(aid, k2) @ j ==> #i = #j"
+
 restriction OneRotationPerAID:
   "All a #i #j. Rotated(a) @ i & Rotated(a) @ j ==> #i = #j"
 
@@ -172,8 +182,10 @@ rule K_Incept:
   in
     [ Fr(~sk0), Fr(~sk1) ]
   --[ IssuerSetup($D), AIDOf($D, aid), KeyCurrent(aid, k0)
-    , Published(aid), Published(k0) ]->
+    , IssuerKey(aid, k0), IssuerKey(aid, pk(~sk1))
+    , Published(aid), Published(k0), Published(n1) ]->
     [ IssuerState($D, aid, ~sk0, ~sk1, 'e0')
+    , !IssuingKey($D, aid, ~sk0, 'e0')
     , !IssuerAID($D, aid)
     , !KeyOf(aid, ~sk0)
     , !KeyOf(aid, ~sk1)
@@ -188,9 +200,10 @@ rule K_Rotate:
       rot = <'rot', aid, k1, n2>
   in
     [ IssuerState(D, aid, sk0, sk1, 'e0'), Fr(~sk2) ]
-  --[ Rotated(aid), Retired(aid, pk(sk0)), KeyCurrent(aid, k1)
+  --[ Rotated(aid), Retired(aid, pk(sk0)), KeyCurrent(aid, k1), IssuerKey(aid, pk(~sk2))
     , Published(k1) ]->
     [ IssuerState(D, aid, sk1, ~sk2, 'e1')
+    , !IssuingKey(D, aid, sk1, 'e1')
     , !KeyOf(aid, ~sk2)
     , !Rot(aid, rot, sign(rot, sk1))
     , Out(<rot, sign(rot, sk1)>)
@@ -198,15 +211,19 @@ rule K_Rotate:
 
 // Issuance: the ACDC itself carries no signature. It is anchored by a seal
 // (its SAID) in an interaction event signed with the current key.
+// Reads the persistent !IssuingKey fact rather than consuming and re-creating
+// IssuerState: that loop made Tamarin unroll issuance histories without end.
+// NoIssueUnderRetiredKey keeps the semantics (no issuance under e0 after the
+// rotation).
 rule K_Issue:
   let said = h(<aid, ~attrs>)
       ixn  = <'ixn', aid, pk(skc), said>
       sig  = sign(ixn, skc)
   in
-    [ IssuerState(D, aid, skc, skn, e), Fr(~attrs) ]
-  --[ Issued(aid, said, <said, aid, ixn, sig>), IssuedUnderKey(aid, said, pk(skc)) ]->
-    [ IssuerState(D, aid, skc, skn, e)
-    , !Ixn(aid, said, ixn, sig)
+    [ !IssuingKey(D, aid, skc, e), Fr(~attrs) ]
+  --[ Issued(aid, said, <said, aid, ixn, sig>), IssuedUnderKey(aid, said, pk(skc))
+    , IssueEpoch(aid, e) ]->
+    [ !Ixn(aid, said, ixn, sig)
     , !TELIss(aid, said)
     , Out(<<said, aid>, ixn, sig>)
     ]
@@ -231,36 +248,44 @@ rule K_Reveal:
 // ---------------------------------------------------------------------
 // Witness pool (AS-WIT). Accepts KEL events from the network, enforcing
 // self-certification and current-key signing. Used by B_CACHED and C.
+//
+// Signature and self-certification checks are written as PATTERN MATCHING
+// (In(<ev, sign(ev, x)>), aid = h(<pk(x), n>)) rather than Eq(verify(..))
+// restrictions. Under the builtin signing theory verify(s, m, pk(k)) = true
+// iff s = sign(m, k), so the accepted messages are exactly the same; pattern
+// matching lets Tamarin unify instead of case-splitting on every way the
+// adversary could have built s, which made the sanity lemmas time out.
 // ---------------------------------------------------------------------
 #ifdef VARIANT_B_CACHED | VARIANT_C
 
 rule W_Accept_Icp:
-  let icp = <'icp', aid, k0, n1> in
-    [ In(<icp, s>) ]
-  --[ Eq(aid, h(<k0, n1>))
-    , Eq(verify(s, icp, k0), true)
-    , WitIncept(aid)
-    , WitKey(aid, k0)
+  let aid = h(<pk(x0), n1>)
+      icp = <'icp', aid, pk(x0), n1>
+  in
+    [ In(<icp, sign(icp, x0)>) ]
+  --[ WitIncept(aid)
+    , WitKey(aid, pk(x0))
     ]->
-    [ WitState(aid, k0, n1) ]
+    [ WitState(aid, pk(x0), n1), !WitKeyState(aid, pk(x0), 'e0') ]
 
 rule W_Accept_Rot:
-  let rot = <'rot', aid, k1, n2> in
-    [ WitState(aid, k0, n1), In(<rot, s>) ]
-  --[ Eq(h(k1), n1)
-    , Eq(verify(s, rot, k1), true)
-    , WitKey(aid, k1)
+  let rot = <'rot', aid, pk(x1), n2> in
+    [ WitState(aid, k0, h(pk(x1))), In(<rot, sign(rot, x1)>) ]
+  --[ WitKey(aid, pk(x1))
     , WitRetired(aid, k0)
     ]->
-    [ WitState(aid, k1, n2) ]
+    [ WitState(aid, pk(x1), n2), !WitKeyState(aid, pk(x1), 'e1') ]
 
+// Reads the persistent !WitKeyState (not the linear WitState, whose
+// consume-and-recreate loop made unforgeability proofs diverge).
+// WitNoOldKeyAfterRotation keeps the semantics: once the witness has accepted
+// the rotation it no longer accepts anchors under the old key.
 rule W_Accept_Ixn:
-  let ixn = <'ixn', aid, k, said> in
-    [ WitState(aid, k, n), In(<ixn, s>) ]
-  --[ Eq(verify(s, ixn, k), true)
-    , WitAnchored(aid, said)
+  let ixn = <'ixn', aid, pk(x), said> in
+    [ !WitKeyState(aid, pk(x), e), In(<ixn, sign(ixn, x)>) ]
+  --[ WitAnchored(aid, said), WitAcceptEpoch(aid, e)
     ]->
-    [ WitState(aid, k, n), !WitIxn(aid, said) ]
+    [ !WitIxn(aid, said) ]
 
 #endif
 
@@ -270,34 +295,32 @@ rule W_Accept_Ixn:
 #ifdef VARIANT_B_CARRIED
 
 // Credential issued under the inception key k0.
+// Checks written as pattern matching (see the witness rules above).
 rule BC_Verify_Accept_Key0:
-  let icp = <'icp', aid, k0, n1>
-      ixn = <'ixn', aid, k0, said>
+  let aid = h(<pk(x0), n1>)
+      icp = <'icp', aid, pk(x0), n1>
+      ixn = <'ixn', aid, pk(x0), said>
   in
-    [ !TrustAID($V, aid), In(<<said, aid>, icp, sicp, ixn, sixn>), Fr(~sid) ]
-  --[ Eq(aid, h(<k0, n1>))
-    , Eq(verify(sicp, icp, k0), true)
-    , Eq(verify(sixn, ixn, k0), true)
-    , AuthAccept(~sid, $V, aid, said)
-    , VerifiedWith(~sid, k0)
+    [ !TrustAID($V, aid)
+    , In(<<said, aid>, icp, sign(icp, x0), ixn, sign(ixn, x0)>), Fr(~sid) ]
+  --[ AuthAccept(~sid, $V, aid, said)
+    , VerifiedWith(~sid, pk(x0))
     , Evidence(~sid, 'carried')
     ]->
     [ AuthOK(~sid, $V, aid, said) ]
 
 // Credential issued under the rotated key k1; holder carries the rot event.
 rule BC_Verify_Accept_Key1:
-  let icp = <'icp', aid, k0, n1>
-      rot = <'rot', aid, k1, n2>
-      ixn = <'ixn', aid, k1, said>
+  let aid = h(<pk(x0), h(pk(x1))>)
+      icp = <'icp', aid, pk(x0), h(pk(x1))>
+      rot = <'rot', aid, pk(x1), n2>
+      ixn = <'ixn', aid, pk(x1), said>
   in
-    [ !TrustAID($V, aid), In(<<said, aid>, icp, sicp, rot, srot, ixn, sixn>), Fr(~sid) ]
-  --[ Eq(aid, h(<k0, n1>))
-    , Eq(verify(sicp, icp, k0), true)
-    , Eq(h(k1), n1)
-    , Eq(verify(srot, rot, k1), true)
-    , Eq(verify(sixn, ixn, k1), true)
-    , AuthAccept(~sid, $V, aid, said)
-    , VerifiedWith(~sid, k1)
+    [ !TrustAID($V, aid)
+    , In(<<said, aid>, icp, sign(icp, x0), rot, sign(rot, x1), ixn, sign(ixn, x1)>)
+    , Fr(~sid) ]
+  --[ AuthAccept(~sid, $V, aid, said)
+    , VerifiedWith(~sid, pk(x1))
     , Evidence(~sid, 'carried')
     ]->
     [ AuthOK(~sid, $V, aid, said) ]
@@ -432,6 +455,25 @@ lemma sanity_authentic_but_revoked:
 
 // ---- 1. Unforgeability / authenticity ------------------------------
 
+#ifdef VARIANT_B_CARRIED | VARIANT_B_CACHED | VARIANT_C
+// Helper (proved once, reused): an anchoring signature under one of the
+// issuer's keys was produced by the issuer for an issued credential, or the
+// key had been revealed. Lets auth_unforgeability terminate.
+lemma ixn_signature_origin [use_induction, reuse]:
+  "All aid k said #i #j.
+       KU(sign(<'ixn', aid, pk(k), said>, k)) @ i & IssuerKey(aid, pk(k)) @ j
+     ==> (Ex c #m. Issued(aid, said, c) @ m & m < i)
+       | (Ex #r. Reveal(aid, pk(k)) @ r & r < i)"
+
+// Helper (reused): a rotation signature under one of the issuer's keys comes
+// from the issuer's own rotation, or the key had been revealed.
+lemma rot_signature_origin [reuse]:
+  "All aid k n #i #j.
+       KU(sign(<'rot', aid, pk(k), n>, k)) @ i & IssuerKey(aid, pk(k)) @ j
+     ==> (Ex #m. Rotated(aid) @ m & m < i)
+       | (Ex #r. Reveal(aid, pk(k)) @ r & r < i)"
+#endif
+
 lemma auth_unforgeability:
   "All sid V D s #a.
        AuthAccept(sid, V, D, s) @ a
@@ -441,12 +483,27 @@ lemma auth_unforgeability:
 // Stronger KERI-specific statement: a key compromised only AFTER it was
 // rotated out must not enable forgery. Meaningful for B/C; in A there is no
 // rotation, so Retired never occurs and this reduces to auth_unforgeability.
+//
+// "Retired" = the rotation is in effect where the verifier gets key state
+// from: at the issuer for carried evidence, at the WITNESSES for cached and
+// online evidence. A compromise between the issuer's rotation and the
+// witnesses accepting it is NOT post-rotation: a lagging witness still treats
+// the old key as current (see docs/cry01.md).
+#ifdef VARIANT_B_CACHED | VARIANT_C
+lemma auth_unforgeability_post_rotation_compromise:
+  "All sid V D s #a.
+       AuthAccept(sid, V, D, s) @ a
+     ==> (Ex c #i. Issued(D, s, c) @ i & i < a)
+       | (Ex k #r. Reveal(D, k) @ r & r < a
+                 & not(Ex #t. WitRetired(D, k) @ t & t < r))"
+#else
 lemma auth_unforgeability_post_rotation_compromise:
   "All sid V D s #a.
        AuthAccept(sid, V, D, s) @ a
      ==> (Ex c #i. Issued(D, s, c) @ i & i < a)
        | (Ex k #r. Reveal(D, k) @ r & r < a
                  & not(Ex #t. Retired(D, k) @ t & t < r))"
+#endif
 
 // ---- 2. Offline authenticity ----------------------------------------
 
@@ -501,10 +558,13 @@ lemma status_verdict_follows_auth:
 // material) before the acceptance. A shared secret is never Published.
 // Note: K(vk)@k cannot be used here - Tamarin only records K facts for terms
 // the adversary actually constructs in the trace.
+// A pre-rotated key is public by commitment: its digest h(vk) is in the
+// published inception event, and the verifier checks vk against it.
 lemma no_shared_secret_path:
   "All sid vk #a.
        VerifiedWith(sid, vk) @ a
-     ==> Ex #p. Published(vk) @ p & p < a"
+     ==> (Ex #p. Published(vk) @ p & p < a)
+       | (Ex #p. Published(h(vk)) @ p & p < a)"
 
 // Negative-control check: in SHARED_SECRET the shared key stays secret, so
 // the acceptance path really does depend on a non-public secret.

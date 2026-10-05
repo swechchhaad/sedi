@@ -67,6 +67,7 @@ def run_one(run, timeout, lemma):
     for flag in run.get("flags", []):
         cmd.append(f"-D{flag}")
     cmd.append(f"--prove={lemma}")
+    cmd += run.get("args", [])        # e.g. ["--heuristic=S"] from the manifest
     t0 = time.time()
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True,
